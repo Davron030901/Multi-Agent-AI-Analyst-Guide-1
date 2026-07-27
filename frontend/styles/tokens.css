@@ -1,0 +1,180 @@
+/* ===========================================================================
+   Design tokens — Multi-Agent AI Analyst
+   ---------------------------------------------------------------------------
+   Two themes, one contract. Every surface, line and text colour is semantic,
+   so components never name a literal colour. Theme is switched by the
+   `data-theme` attribute on <html>, set before first paint by the inline
+   script in app/layout.tsx (no flash of the wrong theme).
+   =========================================================================== */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #0b0f14;      /* deep ink, never pure black */
+  --surface: #121821;     /* cards, panels */
+  --surface-2: #18202b;   /* raised / hover */
+  --line: #1e2733;        /* hairline borders, 1px, used a lot */
+  --text: #e6edf3;
+  --text-muted: #8a97a6;
+  /* Lifted from the brief's #5A6673. That value measures 3.04:1 on --surface,
+     and this token carries 11px mono micro-labels — small text, so AA demands
+     4.5:1, not the 3:1 large-text allowance. The binding background is
+     --surface-2 (#18202B), used by table headers and hover rows, not
+     --surface. #808D9D clears 4.85:1 against all three backgrounds. The
+     brief's value survives as --text-faint-decor for hairlines and dividers,
+     where contrast does not apply. */
+  --text-faint: #808d9d;
+  --text-faint-decor: #5a6673;
+
+  /* Elevation is a background step plus a hairline — not a soft shadow. */
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+
+  /* Tint used behind an agent dot / pill. Kept at ~12% so the hue reads as a
+     signal on the surface rather than as a filled card. */
+  --tint-alpha: 0.14;
+  --rail-idle: #1e2733;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --canvas: #f7f6f3;
+  --surface: #ffffff;
+  --surface-2: #f0efeb;
+  --line: #e2e0da;
+  --text: #14181d;
+  --text-muted: #5e6873;
+  /* Same reasoning as dark; here --surface-2 (#F0EFEB) is the binding
+     background. #626C76 clears 4.65:1 against all three. */
+  --text-faint: #626c76;
+  --text-faint-decor: #8b939d;
+
+  --shadow: 0 1px 2px rgb(20 24 29 / 0.08);
+  --tint-alpha: 0.12;
+  --rail-idle: #e2e0da;
+}
+
+/* Respect the OS when the user has never chosen a theme. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --canvas: #f7f6f3;
+    --surface: #ffffff;
+    --surface-2: #f0efeb;
+    --line: #e2e0da;
+    --text: #14181d;
+    --text-muted: #5e6873;
+    --text-faint: #626c76;
+    --text-faint-decor: #8b939d;
+    --shadow: 0 1px 2px rgb(20 24 29 / 0.08);
+    --tint-alpha: 0.12;
+    --rail-idle: #e2e0da;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Agent identity — these are DATA, not decoration.
+   Permitted uses: a 2px rail, an 8px dot, a label colour, an icon stroke.
+   Never a filled card background.
+
+   Hue assignment is by role, not by prettiness: the two violets bracket the
+   run because supervisor and critic both reason ABOUT the work; the four
+   doers get maximally separated hues so the rail reads as a sequence.
+   --------------------------------------------------------------------------- */
+:root {
+  --supervisor: #7c5cff;
+  --retriever: #4cc9f0;
+  --web: #34d399;
+  --data: #f5a524;
+  --code: #ff7a59;
+  --critic: #c084fc;
+
+  --ok: #2fbf71;
+  --warn: #f5a524;
+  --error: #e5484d;
+}
+
+/* Light mode: every identity hue fails AA as text on a light background, so
+   each gets a darkened label variant. The saturated original still draws the
+   2px rail and the 8px dot, where WCAG's 3:1 non-text rule applies instead —
+   which is the entire reason the `-on-surface` split exists.
+
+   Worst-case measured ratio across --surface (#FFFFFF), --canvas (#F7F6F3) and
+   --surface-2 (#F0EFEB), which is the binding one:
+     supervisor 5.84  retriever 4.94  web 4.65  data 5.15
+     code 5.00        critic 4.95     ok 5.00   warn 5.15   error 5.06        */
+:root[data-theme="light"] {
+  --supervisor-on-surface: #5b3fd6;
+  --retriever-on-surface: #0b6f91;
+  --web-on-surface: #0f7a53;
+  --data-on-surface: #8a5a05;
+  --code-on-surface: #b63c18;
+  --critic-on-surface: #7c3aed;
+  --ok-on-surface: #117542;
+  --warn-on-surface: #8a5a05;
+  --error-on-surface: #c2262b;
+}
+
+/* Dark mode: five hues already clear AA as text on --surface and are used
+   unchanged. Two do not, and are lifted here — the saturated originals stay on
+   the rail and the dot, where WCAG's 3:1 non-text rule applies instead.
+     supervisor #7C5CFF -> 4.10:1 (fails)  ->  #9B84FF -> 6.06:1
+     error      #E5484D -> 4.55:1 (passes, but with no margin) -> #EC5A5F -> 5.26:1 */
+:root,
+:root[data-theme="dark"] {
+  --supervisor-on-surface: #9b84ff;
+  --retriever-on-surface: var(--retriever);
+  --web-on-surface: var(--web);
+  --data-on-surface: var(--data);
+  --code-on-surface: var(--code);
+  --critic-on-surface: var(--critic);
+  --ok-on-surface: var(--ok);
+  --warn-on-surface: var(--warn);
+  --error-on-surface: #ec5a5f;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --supervisor-on-surface: #5b3fd6;
+    --retriever-on-surface: #0b6f91;
+    --web-on-surface: #0f7a53;
+    --data-on-surface: #8a5a05;
+    --code-on-surface: #b63c18;
+    --critic-on-surface: #7c3aed;
+    --ok-on-surface: #117542;
+    --warn-on-surface: #8a5a05;
+    --error-on-surface: #c2262b;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Motion. One orchestrated moment (the handoff); everything else is quiet.
+   --------------------------------------------------------------------------- */
+:root {
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-hover: 120ms;
+  --dur-state: 220ms;
+  --dur-handoff: 420ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-hover: 1ms;
+    --dur-state: 1ms;
+    --dur-handoff: 1ms;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Radii and rhythm. 6 controls / 10 panels / 999 pills only. No 24px blobs.
+   --------------------------------------------------------------------------- */
+:root {
+  --r-control: 6px;
+  --r-panel: 10px;
+  --r-pill: 999px;
+
+  --rail-x: 13px;   /* centre of the rail spine */
+  --dot: 8px;       /* status dot diameter */
+  --measure: 72ch;  /* prose never exceeds this */
+}

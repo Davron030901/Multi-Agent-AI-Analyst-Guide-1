@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 NextAgent = Literal["retriever", "web", "data", "code", "finish"]
 SPECIALISTS = ("retriever", "web", "data", "code")
 
+# Hard cap on how many times ONE specialist may run in a single question.
+# One normal run, plus one more if the critic rejects and asks for something
+# specific. A third attempt means the supervisor is looping, not working.
+MAX_AGENT_RUNS = 2
+
 
 class Route(BaseModel):
     """The supervisor's decision for the next hop."""
@@ -106,14 +111,23 @@ def _gathered_summary(state: AgentState) -> str:
     return "\n".join(lines) if lines else "(nothing gathered yet)"
 
 
-def _agents_used(steps: List[str]) -> set:
-    """Which specialists have already run.
+def _agent_run_counts(steps: List[str]) -> Dict[str, int]:
+    """How many times each specialist has already run.
 
     Specialist steps look like ``"data(sql):ok(attempt 1)"`` or
     ``"retriever(k=4,hits=4)"``; supervisor steps look like ``"supervisor->data"``
     and must NOT count, which is why we match on the step prefix.
     """
-    return {agent for step in steps for agent in SPECIALISTS if step.startswith(agent)}
+    counts: Dict[str, int] = {}
+    for step in steps:
+        for agent in SPECIALISTS:
+            if step.startswith(agent):
+                counts[agent] = counts.get(agent, 0) + 1
+    return counts
+
+
+def _agents_used(steps: List[str]) -> set:
+    return set(_agent_run_counts(steps))
 
 
 def heuristic_route(state: AgentState) -> str:
@@ -178,11 +192,21 @@ def supervisor(state: AgentState) -> Dict[str, Any]:
         reason = f"structured routing failed ({type(exc).__name__}); heuristic fallback"
         logger.warning("Supervisor fell back to heuristic routing: %s", exc)
 
-    # ---- deterministic rail 2: no infinite re-dispatch of one agent -------
-    used = _agents_used(steps)
-    if nxt in SPECIALISTS and nxt in used and state.get("revisions", 0) == 0:
-        logger.info("Supervisor tried to re-run '%s' with no revision pending - finishing.", nxt)
-        nxt, reason = "finish", f"{nxt} already ran; evidence is in state"
+    # ---- deterministic rail 2: no re-dispatch loops -----------------------
+    # Observed failure this guards against: after the critic rejected twice, a
+    # weaker model dispatched 'code' FIVE times in a row with byte-identical
+    # code. The earlier version of this rail only applied when revisions == 0,
+    # so any critic rejection disabled it entirely. The cap is now absolute.
+    runs = _agent_run_counts(steps)
+    if nxt in SPECIALISTS:
+        already = runs.get(nxt, 0)
+        if already >= MAX_AGENT_RUNS:
+            logger.info("Supervisor tried to run '%s' a %d%s time - finishing.",
+                        nxt, already + 1, "rd" if already == 2 else "th")
+            nxt, reason = "finish", f"{nxt} already ran {already}x; no new evidence to gather"
+        elif already >= 1 and state.get("revisions", 0) == 0:
+            logger.info("Supervisor tried to re-run '%s' with no revision pending - finishing.", nxt)
+            nxt, reason = "finish", f"{nxt} already ran; evidence is in state"
 
     return {
         "plan": nxt,

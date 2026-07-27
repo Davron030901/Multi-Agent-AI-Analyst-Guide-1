@@ -12,7 +12,7 @@ answer ships with the critic's caveat attached rather than looping forever.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
@@ -65,6 +65,14 @@ Be strict but fair. Correct hedging like "the evidence does not cover X" is fine
 and should PASS - honest incompleteness is not a failure. Fabricated confidence is.
 
 Set ok=false only if there is a concrete, nameable problem.
+
+## Before you reject - a self-check you must perform
+If you are about to say a figure is wrong, write down the value YOU believe is
+correct and compare it to the value in the answer. **If they are identical, the
+answer is correct: set ok=true.** Rejecting an answer for stating X while your
+own reason says the correct value is X is a contradiction, and it sends the
+system into a pointless revision loop. Re-derive the number from the evidence
+before claiming a mismatch.
 """
 
 
@@ -82,6 +90,23 @@ def heuristic_verdict(state: AgentState) -> Verdict:
     if not has_evidence:
         return Verdict(ok=False, reason="No evidence was gathered, so nothing is grounded.")
     return Verdict(ok=True, reason="Heuristic check passed (LLM verification unavailable).")
+
+
+def _normalise(text: str) -> str:
+    """Collapse a rejection reason so near-identical complaints compare equal."""
+    return " ".join((text or "").lower().split())[:200]
+
+
+def _is_repeat_complaint(new_reason: str, previous_reason: Optional[str]) -> bool:
+    """Has the critic rejected for the same reason it already gave?
+
+    A critic that repeats itself verbatim is stuck, not discerning. The
+    supervisor already tried to close that gap and the evidence did not change,
+    so looping again cannot help - it only burns quota.
+    """
+    if not previous_reason:
+        return False
+    return _normalise(new_reason) == _normalise(previous_reason)
 
 
 def critic(state: AgentState) -> Dict[str, Any]:
@@ -106,6 +131,19 @@ def critic(state: AgentState) -> Dict[str, Any]:
             "revisions": revisions,
             "critic_reason": verdict.reason,
             "steps": steps + ["critic:approved"],
+        }
+
+    # --- stuck-critic guard -------------------------------------------------
+    # If it rejects for exactly the reason it already gave, the loop is not
+    # converging: the supervisor tried to close that gap and the evidence did
+    # not change. Accept, but say plainly that the concern is unresolved.
+    if _is_repeat_complaint(verdict.reason, state.get("critic_reason")):
+        logger.info("Critic repeated its previous complaint - accepting to break the loop.")
+        return {
+            "revisions": revisions,
+            "critic_reason": verdict.reason,
+            "answer": state.get("answer", ""),
+            "steps": steps + [f"critic:approved(repeat complaint, not converging) - {verdict.reason[:100]}"],
         }
 
     new_revisions = revisions + 1

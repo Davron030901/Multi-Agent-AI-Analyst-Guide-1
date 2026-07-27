@@ -1,39 +1,239 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@import "../styles/tokens.css";
 
-:root {
-  color-scheme: dark;
+/* Class-based dark variant. Rarely needed — the semantic tokens already flip —
+   but available for the few places that must differ structurally. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ---------------------------------------------------------------------------
+   Bind the runtime CSS variables to Tailwind utilities. `inline` keeps the
+   var() reference intact, so `bg-surface` follows the live theme instead of
+   being frozen at build time.
+   --------------------------------------------------------------------------- */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-text: var(--text);
+  --color-muted: var(--text-muted);
+  --color-faint: var(--text-faint);
+
+  --color-supervisor: var(--supervisor);
+  --color-retriever: var(--retriever);
+  --color-web: var(--web);
+  --color-data: var(--data);
+  --color-code: var(--code);
+  --color-critic: var(--critic);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-error: var(--error);
+
+  --font-display: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-inter-tight), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* 12 / 13 / 15 / 18 / 22 / 30 / 44, top two clamped for mobile. */
+  --text-2xs: 12px;
+  --text-xs: 13px;
+  --text-base: 15px;
+  --text-md: 18px;
+  --text-lg: 22px;
+  --text-xl: clamp(24px, 4vw, 30px);
+  --text-2xl: clamp(30px, 6vw, 44px);
+
+  --radius-control: var(--r-control);
+  --radius-panel: var(--r-panel);
 }
 
-body {
-  @apply bg-slate-950 text-slate-100 antialiased;
-  background-image:
-    radial-gradient(60rem 40rem at 15% -10%, rgba(99, 102, 241, 0.14), transparent 60%),
-    radial-gradient(50rem 30rem at 90% 0%, rgba(20, 184, 166, 0.10), transparent 55%);
-  background-attachment: fixed;
+/* ---------------------------------------------------------------------------
+   Base
+   --------------------------------------------------------------------------- */
+@layer base {
+  * {
+    border-color: var(--line);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+
+  /* One focus ring everywhere. Visible, 2px, offset 2px. */
+  :focus-visible {
+    outline: 2px solid var(--supervisor);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--supervisor) 30%, transparent);
+    color: var(--text);
+  }
+
+  /* Scrollbars read as instrument hardware, not as chrome. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--line);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--text-faint);
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
 }
 
-/* Thin scrollbars so the trace panel doesn't look heavy */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: rgb(51 65 85) transparent;
-}
-*::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-*::-webkit-scrollbar-thumb {
-  @apply rounded-full bg-slate-700;
-}
-*::-webkit-scrollbar-track {
-  background: transparent;
+/* ---------------------------------------------------------------------------
+   Components
+   --------------------------------------------------------------------------- */
+@layer components {
+  /* Micro-label: STEP 03 · DATA */
+  .label-micro {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    line-height: 1.3;
+  }
+
+  .font-display-tight {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-panel);
+  }
+
+  .hairline-t {
+    border-top: 1px solid var(--line);
+  }
+
+  /* Tabular figures everywhere a number can change while streaming — this is
+     half of the "no layout shift" promise. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+
+  .measure {
+    max-width: var(--measure);
+  }
 }
 
-.card {
-  @apply rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur;
+/* ---------------------------------------------------------------------------
+   Utilities
+   --------------------------------------------------------------------------- */
+@layer utilities {
+  /* Agent tint: a hue at low alpha, used behind dots and pills only. */
+  .tint {
+    background: color-mix(in srgb, var(--agent) calc(var(--tint-alpha) * 100%), transparent);
+  }
+
+  .breathe {
+    animation: breathe 1.6s var(--ease) infinite;
+  }
+
+  .pulse-travel {
+    animation: pulse-travel var(--dur-handoff) var(--ease) forwards;
+  }
+
+  /* A breath, not a sweeping gradient. The travelling-highlight shimmer is the
+     single most recognisable "AI dashboard" tell, and section 2 rules out
+     gradients as decoration. Opacity on a flat surface says "loading" just as
+     clearly and stays inside the quiet register everything else keeps. */
+  .shimmer {
+    background: var(--surface-2);
+    animation: breath 1.4s var(--ease) infinite;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .safe-b {
+    padding-bottom: max(env(safe-area-inset-bottom), 0px);
+  }
 }
 
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+@keyframes breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--agent) 55%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--agent) 0%, transparent);
+  }
+}
+
+@keyframes pulse-travel {
+  from {
+    transform: scaleY(0);
+    transform-origin: top;
+  }
+  to {
+    transform: scaleY(1);
+    transform-origin: top;
+  }
+}
+
+@keyframes breath {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Reduced motion: replace movement with an instant state change. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  .breathe,
+  .shimmer,
+  .pulse-travel {
+    animation: none !important;
+  }
+  /* The breathing dot's job is "this is running" — keep that readable without
+     motion by giving the active dot a static ring instead. */
+  .breathe {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--agent) 35%, transparent);
+  }
 }

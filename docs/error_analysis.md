@@ -1,172 +1,231 @@
 # Error analysis
 
-Three questions the system gets wrong, which node is responsible for each, and one concrete fix apiece.
+Three failures observed on the **live deployment** (Render, `gpt-4o-mini` chat +
+Gemini embeddings), the exact node responsible for each, and the fix applied.
 
-> **How to use this document.** The three failures below are the ones this
-> architecture actually produces — each is reproducible with the command given,
-> and each fix is a real code change with a file and a line of reasoning. Run
-> `python -m eval.run_eval` first: the generated `eval/results/latest.md` lists
-> every case that scored ≤ 3 with its full trace. Replace the "Observed" blocks
-> below with **your** run's output, then keep or adjust the diagnosis. A mentor
-> is grading whether you can read a trace and name the guilty node — not whether
-> your failures match mine.
+All three came from a single question:
+
+> *"How many customers churned in Q2 2026, and why did they leave?"*
+
+The answer was **numerically correct** — 12 churns, correct reason-code
+breakdown. It also took **23 graph steps**, burned the entire revision budget,
+called the code agent five times, and never once used a company document. A
+right answer produced by a broken process.
+
+Full trace as observed:
+
+```
+supervisor->data      data(sql):ok(attempt 1)
+supervisor->retriever retriever(k=4,hits=0)          ← failure 1
+supervisor->finish    generate
+critic:rejected(1/2) - "the total is incorrectly stated as 12;
+                        the correct total is 12..."   ← failure 2
+supervisor->finish    generate(revision 1)
+critic:rejected(2/2) - (identical text)               ← failure 2
+supervisor->code      code:ok(attempt 1)              ┐
+supervisor->code      code:ok(attempt 1)              │
+supervisor->code      code:ok(attempt 1)              ├ failure 3
+supervisor->code      code:ok(attempt 1)              │
+supervisor->code      code:ok(attempt 1)              ┘
+supervisor->finish(step budget)                       ← only the rail stopped it
+generate(revision 2)  critic:approved
+```
 
 ---
 
-## Failure 1 — Supervisor mis-routes a comparison question to one agent
+## Failure 1 — Retriever returned 0 chunks, so the "why" was never answered
 
-**Question:** *"Does our average P1 ticket resolution time meet the resolution target in our support SLA policy?"* (`multi-03` in the test set)
+**Node:** retriever (F3) — but the root cause is upstream of the code.
 
-**Reproduce:**
+**Observed:** `retriever(k=4,hits=0)`. Zero chunks, on a question whose entire
+second half ("and why did they leave?") depends on the churn postmortem.
 
-```bash
-python -m app.graph "Does our average P1 ticket resolution time meet the resolution target in our SLA policy?"
-```
+**What the user got.** The answer listed reason *codes* — `MISSING_FEATURE: 4`,
+`POOR_SUPPORT: 3` — because those come from the SQL `reason_code` column. It
+never explained what those codes *mean*: that `MISSING_FEATURE` was native
+SAP/Workday connectors and multi-step approval branching, or that
+`POOR_SUPPORT` was escalation latency rather than slow first response. All of
+that is in `churn_postmortem_q2_2026.md` and none of it reached the model.
 
-**Observed trace (typical):**
+**The same question, harder evidence.** A second question, *"What meaning this
+project"*, routed to the retriever, got 0 hits, fell through to web search, and
+returned a **generic dictionary definition of the word "project"** — "a
+temporary endeavor aimed at achieving specific goals within defined
+constraints". Confident, fluent, and completely unrelated to Northwind Cloud.
+That is what an empty vector store looks like from the outside: not an error,
+just quietly wrong answers.
 
-```
-supervisor->retriever -> retriever(k=4,hits=4) -> supervisor->finish
--> generate -> critic:approved
-```
+**Cause.** The Qdrant Cloud collection was empty. The database ships inside the
+Docker image (deterministic, no API key needed), but embedding requires a key
+that only exists at runtime — so ingestion is a separate, easily-forgotten step.
+`/health` reported `"status": "ok"` throughout, because the process *was*
+healthy. It just had nothing to retrieve.
 
-**What went wrong.** The question *reads* like a policy question, so the supervisor dispatches the retriever, finds the 8-hour target in `support_sla_policy.md`, and stops. But the question is a **comparison**: it needs the policy target *and* the measured average (9.75 h) from the database. The answer that comes back states the target confidently and either omits the actual figure or — worse — quotes the document's qualitative line *"the average P1 resolution time exceeds the 8-hour target"* as if it were a measurement.
+**Fix — two parts.**
 
-**Guilty node: the supervisor (F7).** Not the retriever, which did exactly what it was asked. The routing prompt says "dispatch ONE agent at a time" but gives no rule for questions whose *form* is a comparison between a documented target and a measured value.
+1. Ingest into the deployed vector store. From your machine, with `QDRANT_URL`
+   and `QDRANT_API_KEY` in `.env`:
 
-**Why the critic didn't save it.** The answer is technically grounded — every claim traces to a retrieved chunk. The critic checks grounding, not whether the *right evidence* was gathered. A well-grounded answer to a half-gathered question passes.
+   ```bash
+   cd backend && python -m ingestion.ingest --reset
+   ```
 
-**Fix.** Teach the supervisor to recognise comparison questions explicitly. In `app/agents/supervisor.py`, add to the rules block of `SUPERVISOR_PROMPT`:
+2. **Make the failure visible instead of silent.** A new `/diagnostics`
+   endpoint reports vector count, embedding provider and a single
+   `ready_to_answer` boolean, with a `fix` field naming the exact command when
+   it is false. `/health` says the process is up; `/diagnostics` says the system
+   can actually answer.
 
-```
-6. A COMPARISON question - "does X meet Y", "are we above/below", "how does A
-   compare to B" - needs BOTH sides. If one side is a documented target or
-   policy and the other is a measured value, you must dispatch BOTH 'retriever'
-   and 'data' before choosing 'finish'.
-```
-
-and mirror it in `heuristic_route()` so the deterministic fallback agrees:
-
-```python
-comparison = re.search(r"\b(meet|meets|compare|versus|vs\.?|above|below|exceed|within target)\b", question)
-if comparison and not {"data", "retriever"} <= used:
-    return "data" if "data" not in used else "retriever"
-```
-
-**Verify:** `pytest tests/test_agents_offline.py -k Routing`, then re-run the question and confirm both agents appear in the trace.
-
----
-
-## Failure 2 — Code agent computes on a stale or mis-parsed number
-
-**Question:** *"What percentage of our total active MRR did we lose to churn in Q2 2026? Show the calculation."* (`multi-02`)
-
-**Reproduce:**
-
-```bash
-python -m app.graph "What percentage of our total active MRR did we lose to churn in Q2 2026? Show the calculation."
-```
-
-**Observed trace (typical):**
-
-```
-supervisor->data -> data(sql):ok(attempt 1) -> supervisor->code
--> code:ok(attempt 1) -> supervisor->finish -> generate -> critic:approved
-```
-
-**What went wrong.** The SQL returns the two figures as a raw tuple string — something like `[(7362.0, 865239.0)]`, or across two rows, or with the columns in the opposite order from what the question implies. The code agent receives that string as *text* and must re-extract the numbers to hardcode them into its snippet. When the SQL result has more than one row, aliased columns, or an unexpected order, the code agent picks the wrong number and produces a confidently wrong percentage — `0.09%` instead of `0.85%`, say.
-
-**Guilty node: the code agent (F6) — but the root cause is the handoff.** The code agent's own arithmetic is exact; the sandbox guarantees that. The failure is that structured data crossed an agent boundary as an unstructured string.
-
-**Why the critic often misses it.** The critic sees the SQL result and the code output and checks the *answer* against them. Because the code output is self-consistent (the printed number really is what that snippet computes), the answer looks internally coherent. The critic has to notice that the code hardcoded the wrong operand — a subtler check than grounding.
-
-**Fix.** Give the code agent structured input instead of asking it to re-parse prose. Two changes in `app/agents/data.py`:
-
-1. Ask for named columns in the SQL prompt (already required: *"give aggregate columns readable aliases"*) and **also** store the parsed rows, not just the rendered string:
-
-```python
-return {
-    "sql_result": f"{safe_sql}\n-> {rows}",
-    "sql_rows": rows,          # add to AgentState
-    ...
-}
-```
-
-2. In `app/agents/code.py`, add a rule to `CODE_PROMPT`:
-
-```
-- The SQL result is shown as `column_name = value` pairs. Use the NAMED value,
-  never positional order. If the value you need is not present by name, print
-  "MISSING: <name>" instead of guessing.
-```
-
-The `MISSING:` sentinel matters — it converts a silent wrong answer into a visible failure the critic will reject.
-
-**Verify:** add a live test asserting `"0.85" in state["answer"]` for this question (already present as `multi-02` in the test set, and as `TestCodeAgent::test_computes_a_percentage_correctly`).
+**Why the critic didn't catch it.** The critic checks whether claims are
+*grounded in the evidence present*. It has no way to know that evidence which
+should have been gathered is missing. This is the blind spot all three failures
+share.
 
 ---
 
-## Failure 3 — Retrieval misses because the question uses the database's vocabulary
+## Failure 2 — The critic rejected an answer for being correct
 
-**Question:** *"Why did the MISSING_FEATURE accounts leave?"*
+**Node:** critic (F8).
 
-**Reproduce:**
+**Observed, twice, verbatim:**
 
-```bash
-python -m app.agents.retriever "Why did the MISSING_FEATURE accounts leave?"
-```
+> *"The total number of churned customers is incorrectly stated as 12; the
+> correct total is 12 based on the breakdown provided."*
 
-**Observed:** the top-k chunks come back from the reason-code *table* in the churn postmortem — a one-line dictionary definition — rather than from §3, *"What we saw in Q2 2026"*, which contains the actual explanation (SAP/Workday connectors, multi-step approval branching).
+The critic asserts 12 is wrong, then states the correct value is 12. It is
+arguing with itself. It burned both revisions on a defect that does not exist,
+and its "objection" is what sent the supervisor hunting for more evidence —
+directly causing Failure 3.
 
-**What went wrong.** `MISSING_FEATURE` is a database enum. The document that *explains* it mostly uses natural language — "customers needed a capability we do not ship", "native SAP and Workday connectors". The embedding of a screaming-snake-case token sits closer to the table row that literally contains that token than to the prose that explains it. Classic vocabulary mismatch: the question speaks SQL, the answer lives in English.
+**Cause.** `gpt-4o-mini` is a small model, and `CRITIC_PROMPT` instructs it to
+be strict. Under pressure to find a problem, it manufactured one and never
+checked its own output for coherence. This is a known small-model failure mode:
+instruction-following without self-consistency.
 
-**Guilty node: the retriever (F3)** — specifically the chunking and query strategy, not the model.
+**Fix — prompt plus a deterministic guard, because a prompt alone is not a
+guarantee.**
 
-**Why the critic didn't save it.** The answer *is* grounded — in the dictionary chunk. It says `MISSING_FEATURE` means the customer needed a capability we do not ship. That is true, and useless. Grounded-but-shallow is the critic's blind spot.
+1. A self-check added to `CRITIC_PROMPT`:
 
-**Fix — pick one, and measure the difference:**
+   > If you are about to say a figure is wrong, write down the value YOU believe
+   > is correct and compare it to the value in the answer. **If they are
+   > identical, the answer is correct: set ok=true.**
 
-**(a) Query expansion before retrieval.** Cheapest and most general. In `app/agents/retriever.py`, expand enum-looking tokens before searching:
+2. A **stuck-critic guard** in `critic()`. If the rejection reason is identical
+   to the previous one, the loop is not converging — the supervisor already
+   tried to close that gap and the evidence did not change. Accept, and record
+   why:
+
+   ```
+   critic:approved(repeat complaint, not converging) - <reason>
+   ```
+
+   Regression-tested in `TestStuckCriticRegression`: an identical complaint
+   breaks the loop and does **not** consume more budget; a genuinely new
+   complaint still rejects normally.
+
+**Also worth doing:** the critic is the one node where model quality pays for
+itself. `OPENAI_MODEL=gpt-4o`, or Gemini for the whole run, removes most of this
+class of error. The guards above make the system robust to a weak critic; they
+do not make a weak critic good.
+
+---
+
+## Failure 3 — The supervisor dispatched the code agent five times
+
+**Node:** supervisor (F7). **This was a bug in the routing rails, not the LLM.**
+
+**Observed:** five consecutive `supervisor->code` → `code:ok(attempt 1)` pairs,
+each generating byte-identical Python:
 
 ```python
-REASON_GLOSS = {
-    "MISSING_FEATURE": "missing capability, feature gap, connector not available, blocked on functionality",
-    "POOR_SUPPORT": "support quality, SLA breach, slow escalation, unresolved P1",
-    "ONBOARDING_FAILURE": "failed activation, never went live, fewer than three workflows",
-    # ...
-}
-
-def expand(question: str) -> str:
-    extra = [gloss for code, gloss in REASON_GLOSS.items() if code in question.upper()]
-    return f"{question} {' '.join(extra)}" if extra else question
+churn_data = [('MISSING_FEATURE', 4), ('POOR_SUPPORT', 3), ('PRICE', 2),
+              ('ONBOARDING_FAILURE', 2), ('MERGER', 1)]
+total_churned = sum(count for reason, count in churn_data)
 ```
 
-**(b) Retrieve more, then re-rank.** Fetch `k=10` and have the LLM keep the 4 chunks that actually answer the question. Better recall, one extra LLM call per retrieval.
+The supervisor's own reason each time: *"To confirm the total number of churned
+customers by explicitly showing the addition of individual counts."* It had
+already confirmed it. Four times.
 
-**(c) Larger chunks for narrative documents.** 1000 characters splits §3 mid-argument. Chunking the postmortem at 1500/250 keeps each reason's explanation intact.
+Only the step budget stopped it — `supervisor->finish(step budget)`. Termination
+held, but ten wasted steps and five API calls is not "working".
 
-Start with (a) — it is ~10 lines and targets this failure precisely.
+**Cause — a real hole in my guard.** The anti-re-dispatch rail read:
 
-**Verify:** re-run `python -m eval.run_eval --quick` and compare `context_recall` and `context_precision` before and after. That is the metric this fix should move; if it doesn't, the diagnosis was wrong.
+```python
+if nxt in SPECIALISTS and nxt in used and state.get("revisions", 0) == 0:
+```
+
+That `revisions == 0` condition means the guard **switched itself off the moment
+the critic rejected anything** — precisely when a confused supervisor is most
+likely to loop. The guard was absent exactly when it was needed.
+
+**Fix.** An absolute per-agent cap, independent of revision state:
+
+```python
+MAX_AGENT_RUNS = 2   # one normal run + one retry if the critic asks for something
+
+runs = _agent_run_counts(steps)
+if nxt in SPECIALISTS:
+    already = runs.get(nxt, 0)
+    if already >= MAX_AGENT_RUNS:
+        nxt = "finish"                       # absolute cap
+    elif already >= 1 and revisions == 0:
+        nxt = "finish"                       # no retry without a pending revision
+```
+
+Regression-tested in `TestRedispatchLoopRegression`, including the exact live
+condition (`revisions = 2`, `code` already run twice → must route to `finish`),
+plus the inverse: a legitimate second run **is** still allowed when a revision
+is pending.
 
 ---
 
 ## Pattern across all three
 
-Every one of these is **grounded but wrong** — which is precisely the failure class a critic that only checks grounding cannot catch. Two of the three were caused by a node *upstream* of where the error surfaced.
+**Every failure was grounded but wrong, and two were caused by a node upstream
+of where the symptom appeared.**
 
-Two structural lessons:
+1. **The critic's blind spot is sufficiency, not grounding.** It verifies that
+   claims match the evidence present. It cannot see evidence that should have
+   been gathered and wasn't. Failure 1 sailed through untouched.
 
-1. **Test the routing, not just the answer.** The evaluation harness scores `routing_accuracy` separately for exactly this reason: an answer can be well-grounded and still be an answer to the wrong question. Failures 1 and 3 show up as a routing/recall regression long before they show up as a bad judge score.
+2. **A rail with a condition on it is not a rail.** The `revisions == 0` clause
+   turned a safety guarantee into a suggestion, and disabled it in exactly the
+   state where it mattered. Termination guarantees must be unconditional — the
+   step budget was, which is the only reason the run ended.
 
-2. **Structured data should not cross agent boundaries as prose.** Failure 2 is the general case: every stringify-then-reparse hop is a place for a silent error. Where an agent hands numbers to another agent, hand it named values.
+3. **Silent degradation is the expensive kind.** An empty vector store produced
+   no errors, no warnings, and a healthy `/health`. It produced *plausible
+   answers*, which is far worse than a crash — you have to already suspect the
+   problem to find it. Hence `/diagnostics`.
 
-**One thing the critic could learn.** All three failures would be caught by adding a *sufficiency* check to `CRITIC_PROMPT` — not "is this claim supported?" but "was the right evidence gathered at all?":
+### The one change that would have caught two of three
+
+Adding a **sufficiency** check to `CRITIC_PROMPT` — asking not "is this claim
+supported?" but "was the right evidence gathered at all?":
 
 ```
 5. **Sufficiency** - does the evidence actually cover every part of the question?
-   If the question compares two things and only one appears in the evidence,
-   set ok=false and name the missing side.
+   A "how many and why" question needs BOTH a count from the database AND an
+   explanation from the documents. If the documents returned nothing, say so and
+   set ok=false - do not let reason CODES stand in for reasons.
 ```
 
-That single addition converts Failures 1 and 3 from silent wrong answers into revision loops. Worth running the harness with and without it and reporting the difference — that is a genuine result, not a claim.
+This turns Failure 1 from a silently thin answer into a visible revision loop.
+Worth running `python -m eval.run_eval` with and without it and reporting the
+difference in `context_recall` — that is a measured result, not a claim.
+
+---
+
+## Reproducing these
+
+```bash
+# Failure 1 - is the vector store actually populated?
+curl -s https://YOUR-SERVICE.onrender.com/diagnostics | python -m json.tool
+
+# Failures 2 and 3 - regression tests, offline, no API key
+cd backend
+pytest tests/test_agents_offline.py -k "Regression" -v
+```

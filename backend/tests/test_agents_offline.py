@@ -6,10 +6,34 @@ grades: F4's graceful skip, F7's routing, F8's revision loop and termination.
 
 from __future__ import annotations
 
+import sys
+from importlib import import_module
+
 import pytest
 
-from app.agents.critic import Verdict, heuristic_verdict, route_after_critic
-from app.agents.supervisor import SPECIALISTS, heuristic_route, route_from_supervisor
+# NOTE: `app/agents/__init__.py` re-exports the node functions, so the names
+# `app.agents.critic` and `app.agents.supervisor` resolve to the FUNCTIONS, not
+# the modules that contain them. monkeypatch.setattr("app.agents.critic", ...)
+# therefore patches the wrong object. Fetch the real modules by name instead.
+critic_module = import_module("app.agents.critic")
+supervisor_module = import_module("app.agents.supervisor")
+assert critic_module is sys.modules["app.agents.critic"]
+
+from app.agents.critic import (
+    Verdict,
+    _is_repeat_complaint,
+    critic,
+    heuristic_verdict,
+    route_after_critic,
+)
+from app.agents.supervisor import (
+    MAX_AGENT_RUNS,
+    SPECIALISTS,
+    _agent_run_counts,
+    heuristic_route,
+    route_from_supervisor,
+    supervisor,
+)
 from app.agents.web import web_agent
 from app.config import settings
 from app.state import evidence_summary, new_state
@@ -86,6 +110,137 @@ class TestRouting:
 
     def test_empty_plan_falls_back_to_finish(self) -> None:
         assert route_from_supervisor(new_state("q")) == "finish"
+
+
+# ---------------------------------------------------------------------------
+# Regression: observed production failures
+# ---------------------------------------------------------------------------
+
+
+class TestRedispatchLoopRegression:
+    """Observed on the live deployment (gpt-4o-mini).
+
+    After the critic rejected twice, the supervisor dispatched 'code' FIVE
+    times in a row with byte-identical code, stopping only when the step budget
+    fired. Cause: the re-dispatch guard was gated on ``revisions == 0``, so any
+    critic rejection switched it off completely.
+    """
+
+    def test_run_counts_ignore_supervisor_steps(self) -> None:
+        steps = ["supervisor->code", "code:ok(attempt 1)", "supervisor->code", "code:ok(attempt 1)"]
+        assert _agent_run_counts(steps) == {"code": 2}
+
+    @staticmethod
+    def _force_route(monkeypatch: pytest.MonkeyPatch, agent: str) -> None:
+        """Make the router insist on ``agent``, so we test the RAIL, not the LLM."""
+        from app.agents.supervisor import Route
+
+        class _Stub:
+            def invoke(self, _prompt):
+                return Route(next=agent, reason=f"forced {agent}")
+
+        monkeypatch.setattr(supervisor_module, "structured", lambda *a, **k: _Stub())
+
+    def test_agent_capped_even_while_revising(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The exact live failure: revisions > 0 used to disable the guard."""
+        self._force_route(monkeypatch, "code")
+
+        state = new_state("How many churned and why?")
+        state["revisions"] = 2
+        state["critic_reason"] = "please confirm the total"
+        state["steps"] = [
+            "supervisor->code", "code:ok(attempt 1)",
+            "supervisor->code", "code:ok(attempt 1)",
+        ]
+
+        out = supervisor(state)
+
+        assert out["plan"] == "finish", (
+            f"'code' already ran {MAX_AGENT_RUNS}x; the supervisor must stop "
+            f"re-dispatching it, got '{out['plan']}'"
+        )
+
+    def test_second_run_allowed_when_a_revision_is_pending(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The cap must not be so tight that a legitimate retry is impossible."""
+        self._force_route(monkeypatch, "data")
+
+        state = new_state("How many churned?")
+        state["revisions"] = 1
+        state["critic_reason"] = "the count is not supported by the SQL result"
+        state["steps"] = ["supervisor->data", "data(sql):ok(attempt 1)"]
+
+        assert supervisor(state)["plan"] == "data"
+
+    def test_no_rerun_without_a_pending_revision(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._force_route(monkeypatch, "data")
+
+        state = new_state("How many churned?")
+        state["steps"] = ["supervisor->data", "data(sql):ok(attempt 1)"]
+
+        assert supervisor(state)["plan"] == "finish"
+
+    def test_cap_allows_at_least_one_retry(self) -> None:
+        assert MAX_AGENT_RUNS >= 2
+
+
+class TestStuckCriticRegression:
+    """Observed on the live deployment (gpt-4o-mini).
+
+    The critic rejected twice with a self-contradicting reason: "the total is
+    incorrectly stated as 12; the correct total is 12". Identical text both
+    times - it was stuck, not discerning, and it burned the whole revision
+    budget plus five code-agent calls.
+    """
+
+    def test_identical_reason_detected(self) -> None:
+        reason = "The total number of churned customers is incorrectly stated as 12."
+        assert _is_repeat_complaint(reason, reason)
+        assert _is_repeat_complaint(reason.upper(), f"  {reason}  ")
+
+    def test_different_reason_not_flagged(self) -> None:
+        assert not _is_repeat_complaint("The MRR figure is unsupported.", "The count is wrong.")
+
+    def test_no_previous_reason_is_not_a_repeat(self) -> None:
+        assert not _is_repeat_complaint("anything", None)
+
+    def test_repeat_complaint_breaks_the_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reason = "The total is incorrectly stated as 12; the correct total is 12."
+
+        class _Stub:
+            def invoke(self, _prompt):
+                return Verdict(ok=False, reason=reason)
+
+        monkeypatch.setattr(critic_module, "structured", lambda *a, **k: _Stub())
+
+        state = new_state("How many churned?")
+        state["answer"] = "12 customers churned."
+        state["sql_result"] = "SELECT COUNT(*) ...\n-> [(12,)]"
+        state["revisions"] = 1
+        state["critic_reason"] = reason  # the SAME complaint as last round
+
+        out = critic(state)
+
+        assert out["steps"][-1].startswith("critic:approved"), "loop was not broken"
+        assert out["revisions"] == 1, "a non-converging loop must not burn more budget"
+        assert route_after_critic({**state, **out}) == "finish"
+
+    def test_a_genuinely_new_complaint_still_rejects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _Stub:
+            def invoke(self, _prompt):
+                return Verdict(ok=False, reason="The MRR figure does not appear in the evidence.")
+
+        monkeypatch.setattr(critic_module, "structured", lambda *a, **k: _Stub())
+
+        state = new_state("How much MRR did we lose?")
+        state["answer"] = "We lost $9,999."
+        state["sql_result"] = "SELECT ...\n-> [(7362.0,)]"
+        state["revisions"] = 1
+        state["critic_reason"] = "An entirely different earlier complaint."
+
+        out = critic(state)
+
+        assert out["revisions"] == 2
+        assert "rejected" in out["steps"][-1]
 
 
 # ---------------------------------------------------------------------------

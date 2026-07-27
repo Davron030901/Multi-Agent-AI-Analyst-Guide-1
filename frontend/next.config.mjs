@@ -1,8 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  // The backend URL is read client-side from NEXT_PUBLIC_API_URL (see .env.local.example).
-  // Nothing secret lives in the frontend - it only ever talks to your own API.
+  // Fonts are self-hosted automatically by next/font (see app/layout.tsx):
+  // Google's files are downloaded at build time and served from our own origin
+  // with font-display: swap. No runtime request to fonts.googleapis.com.
 };
 
 export default nextConfig;
