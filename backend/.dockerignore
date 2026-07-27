@@ -1,0 +1,33 @@
+# Keep the build context small and - more importantly - keep secrets out of it.
+# Anything COPY'd into an image is recoverable from that image's layers.
+
+.env
+.env.*
+*.pem
+*.key
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Regenerated at build time (seed) or at runtime (ingest).
+data/company.db
+data/company.db-journal
+data/qdrant/
+eval/results/
+
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+
+# The frontend deploys to Vercel; it has no business in the API image.
+../frontend/
+../notebooks/

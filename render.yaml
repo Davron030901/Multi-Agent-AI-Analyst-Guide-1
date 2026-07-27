@@ -1,0 +1,102 @@
+# F14 - Render deployment via Docker (free tier, no credit card).
+#
+# 1. Push this repo to GitHub.
+# 2. Render dashboard -> New -> Blueprint -> pick the repo.
+# 3. Add every variable marked `sync: false` in the Render UI. They are
+#    deliberately NOT in this file - secrets never get committed.
+# 4. First deploy only: set AUTO_INGEST=true so the document corpus is embedded
+#    into Qdrant Cloud. Then set it back to false, or every restart re-embeds
+#    and burns API quota.
+#
+# Free-tier facts worth knowing:
+#   * 512 MB RAM   -> use API embeddings (the default), never a local model.
+#   * Ephemeral disk -> an embedded Qdrant folder is wiped on every deploy, so
+#                       QDRANT_URL (Qdrant Cloud, 1 GB free) is required here.
+#   * Sleeps after 15 min idle -> the first request after a sleep takes ~30-50 s.
+
+services:
+  - type: web
+    name: multi-agent-analyst-api
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeploy: true
+
+    envVars:
+      # ---------------------------------------------------------------
+      # SECRETS - set these in the Render dashboard, not here
+      # ---------------------------------------------------------------
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+
+      # Qdrant Cloud is REQUIRED on Render - the free disk is ephemeral, so an
+      # embedded vector folder does not survive a deploy. https://cloud.qdrant.io
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+
+      # ---------------------------------------------------------------
+      # Provider selection
+      #   gemini   - free, no card (default)
+      #   openai   - set LLM_PROVIDER=openai and supply OPENAI_API_KEY
+      #   deepseek - chat only; still needs Gemini or OpenAI for embeddings
+      # ---------------------------------------------------------------
+      - key: LLM_PROVIDER
+        value: gemini
+
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_EMBED_MODEL
+        value: models/gemini-embedding-001
+
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: OPENAI_EMBED_MODEL
+        value: text-embedding-3-small
+
+      # Blank = auto (follows LLM_PROVIDER where that provider has embeddings).
+      # Force with `gemini` or `openai` if you want to mix, e.g. OpenAI chat +
+      # free Gemini embeddings. Changing this changes the vector dimension, so
+      # re-ingest with AUTO_INGEST=true on the next deploy.
+      - key: EMBED_PROVIDER
+        value: ""
+      - key: EMBED_DIM
+        value: "768"
+
+      # ---------------------------------------------------------------
+      # Runtime configuration
+      # ---------------------------------------------------------------
+      # true only on the FIRST deploy (or after changing the embedding model).
+      - key: AUTO_INGEST
+        value: "false"
+      - key: WEB_CONCURRENCY
+        value: "1"
+
+      - key: LANGFUSE_HOST
+        value: https://cloud.langfuse.com
+      - key: SQLITE_PATH
+        value: ./data/company.db
+      - key: RECURSION_LIMIT
+        value: "25"
+      - key: MAX_REVISIONS
+        value: "2"
+      - key: CODE_TIMEOUT_SECONDS
+        value: "15"
+      - key: CODE_MEMORY_LIMIT_MB
+        value: "256"
+
+      # Replace with your real Vercel URL once the frontend is deployed.
+      - key: CORS_ORIGINS
+        value: http://localhost:3000,https://multi-agent-analyst.vercel.app

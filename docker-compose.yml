@@ -1,0 +1,50 @@
+# Local development with the same image Render will build.
+#
+#   docker compose up --build          # API on http://localhost:8000
+#   docker compose --profile vectors up # + a local Qdrant server
+#
+# Reads secrets from the repo-root .env, which is git-ignored.
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: multi-agent-analyst-api:local
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      PORT: "8000"
+      # Embed on first boot so the retriever has something to search.
+      AUTO_INGEST: "${AUTO_INGEST:-true}"
+    volumes:
+      # Persist the vector store across container restarts. Comment out to use
+      # Qdrant Cloud (set QDRANT_URL in .env) instead.
+      - qdrant-data:/app/data/qdrant
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Optional: a real Qdrant server instead of the embedded file mode.
+  # Embedded Qdrant takes an exclusive lock, so it cannot be shared between the
+  # API and the eval harness. This profile removes that limitation.
+  #   docker compose --profile vectors up
+  # then set QDRANT_URL=http://qdrant:6333 in .env
+  qdrant:
+    image: qdrant/qdrant:latest
+    profiles: ["vectors"]
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-server:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant-data:
+  qdrant-server:

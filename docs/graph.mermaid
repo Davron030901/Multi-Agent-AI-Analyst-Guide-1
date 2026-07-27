@@ -1,0 +1,38 @@
+%% Visual 1 - The supervisor multi-agent graph
+%% This is the annotated version for the README. The exact machine-generated
+%% version is available at runtime: GET /graph, or `python -c "from app.graph
+%% import mermaid_diagram; print(mermaid_diagram())"`.
+
+graph TD
+    START([Question]) --> MEM[/"Long-term memory<br/><i>recall past turns</i>"/]
+    MEM --> SUP
+
+    SUP{{"SUPERVISOR<br/><i>structured output: Route</i><br/>picks the next agent"}}
+
+    SUP -.->|retriever| RET["RETRIEVER<br/><i>RAG over Qdrant</i><br/>company documents"]
+    SUP -.->|web| WEB["WEB<br/><i>Tavily search</i><br/>skips cleanly with no key"]
+    SUP -.->|data| DATA["DATA / SQL<br/><i>text-to-SQL</i><br/>SELECT-only guard"]
+    SUP -.->|code| CODE["CODE<br/><i>sandboxed Python</i><br/>AST allow-list + timeout"]
+
+    RET --> SUP
+    WEB --> SUP
+    DATA --> SUP
+    CODE --> SUP
+
+    SUP ==>|finish| GEN["GENERATE<br/><i>draft from evidence only</i>"]
+    GEN --> CRIT{"CRITIC<br/><i>structured output: Verdict</i><br/>grounded? correct? complete?"}
+
+    CRIT ==>|approved| END([Answer + sources])
+    CRIT -.->|"revise (revisions++)"| SUP
+
+    END --> SAVE[/"Long-term memory<br/><i>store Q/A pair</i>"/]
+
+    classDef supervisor fill:#6366f1,stroke:#4f46e5,color:#fff
+    classDef specialist fill:#0f172a,stroke:#475569,color:#e2e8f0
+    classDef critic fill:#ef4444,stroke:#dc2626,color:#fff
+    classDef memory fill:#1e293b,stroke:#334155,color:#94a3b8
+
+    class SUP supervisor
+    class RET,WEB,DATA,CODE,GEN specialist
+    class CRIT critic
+    class MEM,SAVE memory

@@ -1,0 +1,41 @@
+# ---- core orchestration -------------------------------------------------------
+langgraph>=0.2.60,<0.7
+langchain>=0.3.14,<0.4
+langchain-core>=0.3.29,<0.4
+langchain-community>=0.3.14,<0.4
+langchain-text-splitters>=0.3.4,<0.4
+
+# ---- LLM + embeddings --------------------------------------------------------
+# Gemini is the default. langchain-openai serves BOTH the openai provider
+# (gpt-4o-mini + text-embedding-3-small) and deepseek, which speaks the same
+# OpenAI-compatible protocol.
+langchain-google-genai>=2.1.0
+langchain-openai>=0.3.0,<0.4
+
+# ---- vector store -------------------------------------------------------------
+qdrant-client>=1.12.0
+langchain-qdrant>=0.2.0
+
+# ---- specialist agent tools ---------------------------------------------------
+tavily-python>=0.5.0
+SQLAlchemy>=2.0.30
+
+# ---- api / serving ------------------------------------------------------------
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+python-dotenv>=1.0.1
+
+# ---- observability (optional at runtime) --------------------------------------
+langfuse>=2.53.0,<3.0
+
+# ---- evaluation (optional at runtime; heavy) ----------------------------------
+ragas>=0.2.9,<0.3
+datasets>=3.0.0
+pandas>=2.2.0
+tabulate>=0.9.0
+
+# ---- tests --------------------------------------------------------------------
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+httpx>=0.27.0

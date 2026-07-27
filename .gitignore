@@ -1,0 +1,38 @@
+# ---- secrets: never commit ----
+.env
+.env.*
+!.env.example
+!.env.local.example
+frontend/.env.local
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# ---- generated data (regenerate with `make seed && make ingest`) ----
+backend/data/company.db
+backend/data/qdrant/
+backend/eval/results/
+
+# ---- node / next ----
+node_modules/
+.next/
+out/
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# ---- os / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
