@@ -125,6 +125,11 @@ class Settings:
     cors_origins_raw: str = field(
         default_factory=lambda: _env("CORS_ORIGINS", "http://localhost:3000")
     )
+    # Vercel mints a NEW hostname for every deployment
+    # (`project-<hash>.vercel.app`), so an exact-match allowlist breaks on the
+    # next push. A regex scoped to your own project prefix survives that
+    # without opening the API to every site on vercel.app.
+    cors_origin_regex: str = field(default_factory=lambda: _env("CORS_ORIGIN_REGEX"))
 
     # ---------------------------------------------------------------------
     # Derived helpers

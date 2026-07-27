@@ -325,14 +325,18 @@ docker compose up --build
 docker compose --profile vectors up      # then set QDRANT_URL=http://qdrant:6333
 ```
 
-### Render
+### Render + Vercel
 
-1. Push to GitHub.
-2. Render → **New → Blueprint** → pick the repo. It reads `render.yaml` and builds `backend/Dockerfile`.
-3. Add every secret in the dashboard: `GOOGLE_API_KEY` (and/or `OPENAI_API_KEY`), `QDRANT_URL`, `QDRANT_API_KEY`, optionally `TAVILY_API_KEY` and the `LANGFUSE_*` pair.
-4. **First deploy only:** set `AUTO_INGEST=true` so the corpus is embedded into Qdrant Cloud. Then set it back to `false`.
-5. Check `https://your-service.onrender.com/health`.
-6. Deploy `frontend/` to Vercel with `NEXT_PUBLIC_API_URL` set to the Render URL, and add that Vercel URL to `CORS_ORIGINS` on Render.
+**→ Full step-by-step walkthrough: [`DEPLOY.md`](DEPLOY.md)** (Uzbek — Qdrant Cloud, Render, Vercel, CORS, troubleshooting).
+
+The short version:
+
+1. Push to GitHub. Verify `.env` is **not** in `git ls-files`.
+2. Create a free Qdrant Cloud cluster; ingest into it from your machine (`QDRANT_URL` in `.env`, then `python -m ingestion.ingest --reset`).
+3. Render → **New → Blueprint** → pick the repo. It reads `render.yaml` and builds `backend/Dockerfile`.
+4. Add the secrets in the dashboard: `GOOGLE_API_KEY` (and/or `OPENAI_API_KEY`), `QDRANT_URL`, `QDRANT_API_KEY`, optionally `TAVILY_API_KEY` and the `LANGFUSE_*` pair.
+5. Vercel → import the repo, **set Root Directory to `frontend`**, and set `NEXT_PUBLIC_API_URL` *before* the first build — `NEXT_PUBLIC_*` is inlined at build time, so changing it later needs a redeploy.
+6. Back on Render, put the Vercel URL into `CORS_ORIGINS`. This step is the one people forget.
 
 Three free-tier facts that will otherwise cost you an afternoon:
 
@@ -365,9 +369,12 @@ Three free-tier facts that will otherwise cost you an afternoon:
 Quick API check:
 
 ```bash
-curl -s localhost:8000/health | python -m json.tool
+curl -s localhost:8000/health      | python -m json.tool   # is the process up?
+curl -s localhost:8000/diagnostics | python -m json.tool   # is it ready to ANSWER?
 curl -N "localhost:8000/ask/stream?q=How+many+customers+churned+in+Q2+2026+and+why"
 ```
+
+`/health` and `/diagnostics` answer different questions, and the difference matters on a fresh deploy. `/health` says the process booted. `/diagnostics` says the *data* is in place — vector count, embedding provider, database row counts, and a single `ready_to_answer` boolean. The failure it catches is the common one: the API boots perfectly, but nobody ran ingestion, so the retriever silently returns nothing and every "why" question comes back thin. When it's false, the response carries a `fix` field telling you the exact command.
 
 ---
 
@@ -418,7 +425,7 @@ See [`docs/error_analysis.md`](docs/error_analysis.md) — three traced failures
 | `Storage folder … is already accessed by another instance` | embedded Qdrant is single-process | stop the API before running eval, or set `QDRANT_URL` for cloud mode |
 | `Database not found` | not seeded | `python -m ingestion.seed_db` |
 | `attempt to write a readonly database` | something tried to write | working as designed — the data agent is read-only |
-| Retriever returns nothing | corpus not ingested | `python -m ingestion.ingest` |
+| Retriever returns nothing | corpus not ingested | check `/diagnostics` → `document_vectors: 0`, then `python -m ingestion.ingest --reset` |
 | `429 / quota exceeded` | Gemini free-tier rate limit | wait a minute; use `--quick` for evaluation |
 | Frontend says "backend unreachable" | API not running, or wrong URL | check `NEXT_PUBLIC_API_URL` in `frontend/.env.local` |
 | Render first request takes ~40 s | free instances sleep after 15 min idle | expected on the free plan |

@@ -49,12 +49,34 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins or ["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+def cors_kwargs(cfg: Optional[Any] = None) -> Dict[str, Any]:
+    """Build the CORSMiddleware configuration from settings.
+
+    A pure function of config rather than inline setup, so the allowlist can be
+    unit tested against any configuration without reimporting this module -
+    reloading it would rebind exception classes and break identity checks
+    elsewhere in the suite.
+    """
+    cfg = cfg or settings
+    kwargs: Dict[str, Any] = {
+        "allow_origins": cfg.cors_origins or ["*"],
+        # False on purpose: no cookies or auth headers cross the boundary, which
+        # is what keeps a regex/wildcard origin safe here.
+        "allow_credentials": False,
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+    }
+    if cfg.cors_origin_regex:
+        kwargs["allow_origin_regex"] = cfg.cors_origin_regex
+    return kwargs
+
+
+app.add_middleware(CORSMiddleware, **cors_kwargs())
+
+logger.info(
+    "CORS allowlist: %s%s",
+    settings.cors_origins or ["*"],
+    f" | regex: {settings.cors_origin_regex}" if settings.cors_origin_regex else "",
 )
 
 
@@ -83,6 +105,112 @@ class AskResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+@app.get("/")
+def root() -> Dict[str, Any]:
+    """Service card.
+
+    Without this, visiting the deployed URL in a browser returns a bare 404 -
+    which looks broken to anyone you share the link with.
+    """
+    return {
+        "service": "Multi-Agent AI Analyst",
+        "version": __version__,
+        "description": (
+            "A supervisor routes each question to specialist agents "
+            "(documents, web, SQL, sandboxed code); a critic verifies the answer."
+        ),
+        "endpoints": {
+            "health": "/health",
+            "diagnostics": "/diagnostics",
+            "graph": "/graph",
+            "ask": "POST /ask",
+            "stream": "GET /ask/stream?q=... | POST /ask/stream",
+            "docs": "/docs",
+        },
+        "try_it": "/ask/stream?q=How%20many%20customers%20churned%20in%20Q2%202026%20and%20why",
+    }
+
+
+@app.get("/diagnostics")
+def diagnostics() -> Dict[str, Any]:
+    """Is this deployment actually *ready to answer*, not merely running?
+
+    ``/health`` says the process is up. This says the data is in place - which
+    is the failure people actually hit: the API boots perfectly, but nobody ran
+    ingestion, so the retriever silently returns nothing and every "why"
+    question comes back thin.
+
+    Deliberately NOT part of /health: Render pings that endpoint constantly and
+    a Qdrant round-trip on every ping is waste.
+    """
+    report: Dict[str, Any] = {
+        "vector_store": {
+            "mode": "cloud" if settings.uses_qdrant_cloud else "embedded",
+            "location": settings.qdrant_url or str(settings.qdrant_dir),
+            "embed_provider": settings.embed_provider,
+            "embed_model": settings.embed_model,
+            "configured_dim": settings.embed_dim,
+        },
+        "database": {"path": str(settings.db_path), "exists": settings.db_path.exists()},
+    }
+
+    # --- documents collection ---------------------------------------------
+    try:
+        from .vectorstore import count
+
+        docs = count(settings.qdrant_collection)
+        report["vector_store"]["documents_collection"] = settings.qdrant_collection
+        report["vector_store"]["document_vectors"] = docs
+        report["vector_store"]["ingested"] = docs > 0
+        if docs == 0:
+            report["vector_store"]["fix"] = (
+                "Collection is empty - the retriever will return nothing. "
+                "Ingest from your machine with QDRANT_URL set: "
+                "`cd backend && python -m ingestion.ingest --reset`, "
+                "or redeploy once with AUTO_INGEST=true."
+            )
+    except Exception as exc:
+        report["vector_store"]["error"] = f"{type(exc).__name__}: {exc}"
+        report["vector_store"]["ingested"] = False
+
+    # --- memory collection -------------------------------------------------
+    try:
+        from .memory import size
+
+        report["vector_store"]["memory_collection"] = settings.qdrant_memory_collection
+        report["vector_store"]["memory_turns"] = size()
+    except Exception as exc:
+        report["vector_store"]["memory_error"] = str(exc)
+
+    # --- database sanity ---------------------------------------------------
+    if settings.db_path.exists():
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+            try:
+                customers = conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
+                q2 = conn.execute(
+                    "SELECT COUNT(*) FROM churn_events "
+                    "WHERE churn_date BETWEEN '2026-04-01' AND '2026-06-30'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            report["database"].update(
+                {
+                    "customers": customers,
+                    "q2_2026_churns": q2,
+                    "seed_correct": customers == 180 and q2 == 12,
+                }
+            )
+        except Exception as exc:
+            report["database"]["error"] = f"{type(exc).__name__}: {exc}"
+
+    ready = bool(report["vector_store"].get("ingested")) and report["database"].get("seed_correct")
+    report["ready_to_answer"] = bool(ready)
+    return report
 
 
 @app.get("/health")

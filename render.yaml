@@ -98,5 +98,14 @@ services:
         value: "256"
 
       # Replace with your real Vercel URL once the frontend is deployed.
+      # No trailing slash - the browser sends Origin without one.
       - key: CORS_ORIGINS
-        value: http://localhost:3000,https://multi-agent-analyst.vercel.app
+        value: http://localhost:3000
+
+      # Vercel mints a NEW hostname per deployment (project-<hash>.vercel.app),
+      # so an exact list breaks on the next push. Set this to a regex scoped to
+      # your own project prefix - NOT a blanket .*\.vercel\.app, which would let
+      # anyone's site call your API and spend your quota. Example:
+      #   https://multi-agent-ai-analyst-guide-1-lg67.*\.vercel\.app
+      - key: CORS_ORIGIN_REGEX
+        sync: false
